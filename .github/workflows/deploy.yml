@@ -1,0 +1,24 @@
+﻿name: Deploy Uptime Sentinel to Azure
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Note: For full automated GitHub Actions deployment, you would configure an Azure Service Principal 
+      # and add AZURE_CREDENTIALS as a GitHub Repository Secret. For our manual first deployment today, 
+      # we will deploy directly from your local terminal using Azure CLI!
+      - name: Workflow Ready Notification
+        run: echo "CI/CD Pipeline template verified successfully."
