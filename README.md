@@ -1,73 +1,63 @@
 # Uptime Sentinel
 
-A serverless website uptime and SSL-expiry monitor on Azure. A timer-triggered Python Azure Function probes a list of URLs every minute, records status, latency and certificate days remaining, and ships structured logs to Application Insights / Log Analytics for querying and alerting. The whole environment is deployed with Bicep.
+A small serverless uptime and SSL expiry monitor I built on Azure. A Python Azure Function runs every minute, checks a list of URLs, and logs the status, latency and certificate days remaining to Application Insights. Everything is deployed with Bicep.
 
-## Features
+I built it as a hands-on Azure project. Monitoring and certificate expiry are things I've dealt with on the support side, so I wanted to build the tooling myself.
 
-- **HTTP health checks**: status code and response latency for each target URL
-- **SSL certificate expiry**: days remaining on each HTTPS endpoint, with a warning under 15 days
-- **Status classification**: `UP` (2xx/3xx), `DEGRADED` (4xx/5xx), `DOWN` (timeout or connection failure)
-- **Structured logs**: consistent `CHECK_RESULT`, `CHECK_FAILURE` and `SSL_*` messages that are easy to query with KQL
-- **Config-driven targets**: URLs are passed in as a Bicep parameter and exposed to the function as an app setting
-- **Infrastructure as code**: one Bicep template provisions everything
+## What it does
 
-## Architecture
+- Checks each URL for HTTP status and response time
+- Gets the SSL certificate expiry and warns when under 15 days remain
+- Classifies each check as `UP` (2xx/3xx), `DEGRADED` (4xx/5xx) or `DOWN` (timeout or connection failure)
+- Writes consistent log lines (`CHECK_RESULT`, `CHECK_FAILURE`, `SSL_WARNING`) that are easy to query with KQL
+- Takes its target URLs from a Bicep parameter
+
+## How it fits together
 
 ```
 Timer trigger (every 60s)
         │
         ▼
 Azure Function (Python 3.11, Linux Consumption)
-        │   requests + ssl (standard library)
-        ▼
-Target URLs  ──►  status, latency, cert expiry
         │
         ▼
-Application Insights ──► Log Analytics workspace ──► KQL queries / alerts
+Target URLs → status, latency, cert expiry
+        │
+        ▼
+Application Insights → Log Analytics → KQL
 ```
 
-**Azure resources deployed by `main.bicep`:**
+Deployed by `main.bicep`: storage account, App Service plan (Y1), Function App with a system-assigned identity, Application Insights, and a Log Analytics workspace.
 
-| Resource | Purpose |
-| --- | --- |
-| Storage account | Function runtime storage and content share |
-| App Service plan (Y1, Linux) | Consumption hosting |
-| Function App | Runs the probe, system-assigned managed identity |
-| Application Insights | Telemetry from the function |
-| Log Analytics workspace | Backing store for Application Insights |
-
-## Repository structure
+## Repo layout
 
 ```
 azure-uptime-sentinel/
 ├── infrastructure/
-│   ├── main.bicep          # All Azure resources
-│   └── parameters.json     # Target URLs
+│   ├── main.bicep
+│   └── parameters.json
 ├── src/
-│   ├── function_app.py     # Timer-triggered probe
+│   ├── function_app.py
 │   ├── host.json
 │   └── requirements.txt
 └── .github/workflows/
-    └── deploy.yml          # CI/CD template (placeholder)
+    └── deploy.yml
 ```
 
-## Prerequisites
-
-- An Azure subscription
-- [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) with Bicep (`az bicep install`)
-- [Azure Functions Core Tools v4](https://learn.microsoft.com/azure/azure-functions/functions-run-local)
-- Python 3.11
+`deploy.yml` is only a placeholder for now. I deploy from my terminal.
 
 ## Deploy
 
-**1. Sign in and create a resource group**
+You need the Azure CLI (with Bicep), Azure Functions Core Tools v4 and Python 3.11.
+
+Create the resource group:
 
 ```powershell
 az login
 az group create --name rg-uptime-sentinel-lab --location northeurope
 ```
 
-**2. Deploy the infrastructure**
+Deploy the infrastructure:
 
 ```powershell
 az deployment group create `
@@ -77,7 +67,7 @@ az deployment group create `
     --output table
 ```
 
-**3. Publish the function code** (run from `src/`, where `host.json` lives)
+Publish the code. Run this from `src/`, because that's where `host.json` is:
 
 ```powershell
 cd src
@@ -85,11 +75,11 @@ func azure functionapp publish uptimesentinel-func --python
 cd ..
 ```
 
-The first cold start can take a few minutes. Telemetry then takes a few more to appear in Application Insights.
+The first cold start takes a few minutes, and logs take a few more to show up in Application Insights.
 
-## Configuration
+## Changing the targets
 
-Targets are set in `infrastructure/parameters.json`:
+Edit `infrastructure/parameters.json`:
 
 ```json
 {
@@ -104,13 +94,11 @@ Targets are set in `infrastructure/parameters.json`:
 }
 ```
 
-The Bicep template joins them into the `TARGET_URLS` app setting as a comma-separated list. To change targets without redeploying infrastructure, edit that app setting on the Function App directly.
+Bicep joins these into the `TARGET_URLS` app setting. You can also edit that setting directly on the Function App.
 
-## Querying results
+## Checking the results
 
-Run these in Application Insights → **Logs**.
-
-**Latest checks**
+In Application Insights, open Logs and run:
 
 ```kusto
 traces
@@ -120,7 +108,7 @@ traces
 | order by timestamp desc
 ```
 
-**Anything not UP**
+Anything that isn't UP:
 
 ```kusto
 traces
@@ -130,41 +118,31 @@ traces
 | order by timestamp desc
 ```
 
-**Certificates close to expiry**
-
-```kusto
-traces
-| where timestamp > ago(1h)
-| where message has "SSL_WARNING"
-| project timestamp, message
-| order by timestamp desc
-```
-
-Example log line:
+Example output:
 
 ```
 CHECK_RESULT | URL: https://microsoft.com | Status: UP | Code: 200 | Latency: 101ms | SSL Days: 61
 ```
 
-## Lessons learned
+## Problems I hit
 
-- **Never leave connection-string placeholders in app settings.** An empty `AccountName=;AccountKey=;` string fails deployment with `WEBSITE_CONTENTAZUREFILECONNECTIONSTRING has an invalid value`. Build it from the real storage account with `listKeys()` instead.
-- **App settings belong in `siteConfig.appSettings`.** A `sites/config` resource named `web` configures site settings, not app settings.
-- **Storage account names are global.** Use `uniqueString(resourceGroup().id)` to avoid collisions.
-- **Prefer the standard library for simple jobs.** The cryptography package's certificate API changed between versions. Python's `ssl.getpeercert()` and `ssl.cert_time_to_seconds()` give the expiry date with no extra dependency.
-- **Check the exit code before declaring success.** A deployment script that prints "complete" regardless of failure hides real errors.
+- **Deployment failed with `WEBSITE_CONTENTAZUREFILECONNECTIONSTRING has an invalid value`.** My storage connection strings were empty placeholders. I now build them from the real storage account with `listKeys()`.
+- **App settings weren't applying.** I had them under a `sites/config` resource named `web`, which is the wrong place. They now sit in `siteConfig.appSettings`.
+- **Storage account name clashes.** Names are global, so I now use `uniqueString(resourceGroup().id)`.
+- **SSL check failing silently.** The `cryptography` certificate attributes I used didn't exist, so every check returned no expiry data. I replaced it with the standard library (`ssl.getpeercert()` and `ssl.cert_time_to_seconds()`), which also removed a dependency.
+- **Publish failed with "Unable to find project root".** I was running `func` from the repo root instead of `src/`.
+- **Generated code needs checking.** Some of the original code came from an AI assistant and looked fine but didn't work. The logs showed what was actually happening, so I now verify in Application Insights before calling anything done.
 
-## Roadmap
+## To do
 
-- [ ] Azure Monitor alert rules for `DOWN` and `DEGRADED` results
-- [ ] Switch `AzureWebJobsStorage` to identity-based access (no account keys)
-- [ ] Store results as custom metrics for dashboards
-- [ ] Working GitHub Actions pipeline using OIDC login and the Functions deploy action
-- [ ] Unit tests for the status classification and expiry logic
+- Azure Monitor alert rules for `DOWN` and `DEGRADED`
+- Identity-based storage access instead of account keys
+- A working GitHub Actions deployment using OIDC
+- Unit tests for the status and expiry logic
 
 ## Cost
 
-Runs on the Consumption plan, so you pay per execution plus storage and log ingestion. At one run per minute this is normally small, but check the Azure pricing calculator and set a budget alert on the resource group.
+It runs on the Consumption plan, so you pay per execution plus storage and log ingestion. I haven't priced it exactly. Set a budget alert on the resource group.
 
 ## Cleanup
 
